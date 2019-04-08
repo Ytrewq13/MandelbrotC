@@ -2,7 +2,7 @@
 # include <complex.h>
 
 # define MAX_ITER 128
-# define MY_INFINITY 64
+# define MY_INFINITY 16
 
 # define IMG_WIDTH 1280
 # define IMG_HEIGHT 800
@@ -17,7 +17,8 @@ pixel_t * get_color(double x, double y) {
 	int iterations = 0;
 	while (pow(creal(number), 2) + pow(cimag(number), 2) < MY_INFINITY && iterations < MAX_ITER) {
 		iterations++;
-		number = cpow(number, 2) + x + y * I;
+		//number = cpow(number, 2) + x + y * I;
+        number = cpow(number, 2) + CMPLX(x,y);
 	}
 
 	// normalize between 0 and 360 for hue.

@@ -8,4 +8,7 @@ OBJ := $(patsubst %.c,%.o,$(wildcard *.c))
 
 a.out: $(OBJ)
 	$(CC) -o $@ $^ $(CFLAGS)
+
+clean:
+	rm -f a.out *.png
 	rm $(OBJ)

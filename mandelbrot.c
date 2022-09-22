@@ -3,20 +3,20 @@
 #include <pthread.h>
 #include <string.h>
 #include "threads.h"
+#include <time.h>
+#include <unistd.h>
 
 #define MAX_ITER 128
 #define MY_INFINITY 16
-#define IMG_WIDTH 1920
-#define IMG_HEIGHT 1080
+#define IMG_WIDTH 3840
+#define IMG_HEIGHT 2160
 #define X_MIN -2.5
 #define X_MAX 1.5
 
 #define HUE_OFFSET 0
 
-// TODO: use nproc() to determine the best number of threads
-#define THREADS_CNT 16
-
-pixel_t * get_color(double x, double y) {
+void calculate_color(double x, double y, pixel_t *pixel)
+{
     // calculate the color of a pixel with complex value x, y
     double complex number = 0;
     const double complex offset = x + y * I;
@@ -31,14 +31,12 @@ pixel_t * get_color(double x, double y) {
     struct HSV hsv = {hue, 1.0, 1.0};
     struct RGB rgb = HSVToRGB(hsv);
 
-    pixel_t * pixel = (pixel_t*)malloc(sizeof(pixel_t));
     pixel->red = (int) rgb.R;
     pixel->green = (int) rgb.G;
     pixel->blue = (int) rgb.B;
     if (iterations == MAX_ITER) {
         pixel->red = pixel->green = pixel->blue = 0;
     }
-    return pixel;
 }
 
 void render_row(int y, bitmap_t *img)
@@ -50,9 +48,7 @@ void render_row(int y, bitmap_t *img)
     for (int x = 0; x < img->width; x++) {
         pixel_t *pixel = pixel_at(img, x, y);
         x_coord = ((double)x / (double)img->width) * (X_MAX - X_MIN) + X_MIN;
-        pixel_t *color = get_color(x_coord, y_coord);
-        memcpy(pixel, color, sizeof(pixel_t));
-        free(color);
+        calculate_color(x_coord, y_coord, pixel);
     }
 }
 
@@ -65,12 +61,22 @@ void *render_rows(void *ptr)
 }
 
 int main(int argc, char ** argv) {
-    pthread_t threads[THREADS_CNT];
+    long nproc = sysconf(_SC_NPROCESSORS_ONLN);
+
+    pthread_t threads[nproc];
+    int threads_busy[nproc];
+    int threads_avail = nproc;
+
     // Create the png.
     bitmap_t image;
     int y;
     image.width = IMG_WIDTH;
     image.height = IMG_HEIGHT;
+
+    // Time how long things take
+    clock_t start_time, end_time;
+    clock_t duration_create_args, duration_create_threads,
+            duration_join_threads;
 
     image.pixels = calloc(image.width * image.height, sizeof(pixel_t));
 
@@ -88,9 +94,11 @@ int main(int argc, char ** argv) {
      *   render. When a thread is finished, we reuse it to compute the next
      *   row.
      */
-    struct render_thread_info thread_args[THREADS_CNT];
-    int thread_row_cnt = IMG_HEIGHT / THREADS_CNT;
-    for (int i = 0; i < THREADS_CNT; i++) {
+    start_time = clock();
+    struct render_thread_info thread_args[nproc];
+    int thread_row_cnt = IMG_HEIGHT / nproc;
+    for (int i = 0; i < nproc; i++) {
+        threads_busy[i] = 1;
         thread_args[i].img = &image;
         thread_args[i].start = i * thread_row_cnt;
         thread_args[i].end = thread_args[i].start + thread_row_cnt;
@@ -99,16 +107,27 @@ int main(int argc, char ** argv) {
         printf("Thread %02d: rows [%03d,%03d)\n", i, thread_args[i].start,
                 thread_args[i].end);
     }
+    end_time = clock();
+    duration_create_args = end_time - start_time;
+    printf("Finished creating thread args in %ld microseconds\n", duration_create_args);
 
-    for (int i = 0; i < THREADS_CNT; i++) {
+    start_time = clock();
+    for (int i = 0; i < nproc; i++) {
         pthread_create(threads+i, NULL, render_rows, &thread_args[i]);
     }
+    end_time = clock();
+    duration_create_threads = end_time - start_time;
+    printf("Finished creating threads in %ld microseconds\n", duration_create_threads);
 
-    for (int i = 0; i < THREADS_CNT; i++) {
+    for (int i = 0; i < nproc; i++) {
+        start_time = clock();
         pthread_join(threads[i], NULL);
+        end_time = clock();
+        duration_join_threads = end_time - start_time;
+        printf("Joined thread %d in %ld microseconds\n", i, duration_join_threads);
     }
 
-    save_png_to_file(&image, "image.png");
+    save_png_to_file(&image, "out/image.png");
     free(image.pixels);
     return 0;
 }

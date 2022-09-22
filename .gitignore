@@ -1,0 +1,4 @@
+mandelbrot
+*.o
+image.png
+tags

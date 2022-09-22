@@ -1,5 +1,5 @@
 CC=gcc
-CFLAGS=-I. -lpng -lm
+CFLAGS=-I. -lpng -lm -Wall
 DEPS = $(wildcard *.h)
 OBJ := $(patsubst %.c,%.o,$(wildcard *.c))
 

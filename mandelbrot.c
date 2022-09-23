@@ -15,13 +15,25 @@
 
 #define HUE_OFFSET 0
 
+/* TODO:
+ * * Rework thread pool to run arbitrary rendering function
+ *      * Render row (existing function)
+ *      * Render dynamic rectangle - to allow rendering center of image first
+ *      * Function which calls pthread_exit()
+ * * Use SLD2 to display the rendered image
+ *      * Interactive controls to move display window (click & drag)
+ *      * Re-render the image on-the-fly using the thread-pool (only re-render
+ *      new regions)
+ */
+
 void calculate_color(double x, double y, pixel_t *pixel)
 {
     // calculate the color of a pixel with complex value x, y
     double complex number = 0;
     const double complex offset = x + y * I;
     int iterations = 0;
-    while (pow(creal(number), 2) + pow(cimag(number), 2) < MY_INFINITY && iterations < MAX_ITER) {
+    while (pow(creal(number), 2) + pow(cimag(number), 2) < MY_INFINITY &&
+            iterations < MAX_ITER) {
         iterations++;
         number = cpow(number, 2) + offset;
     }
@@ -54,6 +66,7 @@ void render_row(int y, bitmap_t *img)
 
 void *worker_spin(void *ptr)
 {
+    /* TODO: run arbitrary work function passed via the queue. */
     struct spin_thread_args *spin = ptr;
     int *row_ptr;
     int rows_rendered = 0;
@@ -61,10 +74,10 @@ void *worker_spin(void *ptr)
     while (true) {
         queue_get(spin->q, (void**)&row_ptr);
         if (*row_ptr < 0) {
-            printf("[WORKER %02d] Exiting (rendered %04d rows)...\n", spin->id, rows_rendered);
+            printf("[WORKER %02d] Exiting (rendered %04d rows)...\n", spin->id,
+                    rows_rendered);
             pthread_exit(NULL);
         }
-//        printf("[WORKER %02d] Rendering row %d...\n", spin->id, *row_ptr);
         render_row(*row_ptr, spin->img);
         rows_rendered++;
         free(row_ptr);

@@ -24,6 +24,7 @@
  *      * Interactive controls to move display window (click & drag)
  *      * Re-render the image on-the-fly using the thread-pool (only re-render
  *      new regions)
+ * * Arbitrary-precision math
  */
 
 void calculate_color(double x, double y, pixel_t *pixel)

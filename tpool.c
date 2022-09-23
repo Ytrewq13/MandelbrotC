@@ -64,7 +64,7 @@ void queue_get(struct queue *q, void (**func)(void *), void **args)
         pthread_cond_wait(&q->cond, &q->mtx);
 
     /* Get the item from the first queue entry and free that entry */
-    *func = q->first->func;
+    *func = (void (*)(void*))q->first->func;
     *args = q->first->args;
     struct queue_item *next = q->first->next;
     free(q->first);

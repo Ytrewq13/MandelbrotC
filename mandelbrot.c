@@ -127,21 +127,10 @@ void *worker_spin(void *ptr)
     struct spin_thread_args *spin = ptr;
     void (*work_func)(void *);
     void *work_args;
-    int rows_rendered = 0;
-    long wait_ns = 0, render_ns = 0;
-    struct rendering_stats *stats;
-    struct timespec start, end;
     printf("[WORKER %02d] Worker start\n", spin->id);
     while (true) {
-        clock_gettime(CLOCK_REALTIME, &start);
         queue_get(spin->q, &work_func, &work_args);
-        clock_gettime(CLOCK_REALTIME, &end);
-        wait_ns += nanos_diff(start, end);
-        clock_gettime(CLOCK_REALTIME, &start);
         work_func(work_args);
-        clock_gettime(CLOCK_REALTIME, &end);
-        render_ns += nanos_diff(start, end);
-        rows_rendered++;
     }
     return NULL;
 }

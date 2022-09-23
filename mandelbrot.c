@@ -1,3 +1,4 @@
+#include <SDL2/SDL_events.h>
 #include <complex.h>
 #include <string.h>
 #include <time.h>
@@ -5,15 +6,16 @@
 #include <SDL2/SDL.h>
 
 #include "png_maker.h"
-#include "threads.h"
+#include "tpool.h"
+#include "sdl_window.h"
 
 
 #define MAX_ITER 128
-#define MY_INFINITY 16
+#define MY_INFINITY 4
 #define IMG_WIDTH 1280
 #define IMG_HEIGHT 720
-#define X_MIN -2.5
-#define X_MAX 1.5
+#define X_MIN -2.6
+#define X_MAX 1.6
 
 #define HUE_OFFSET 0
 
@@ -29,27 +31,36 @@
  * * Arbitrary-precision math
  */
 
-void calculate_color(double x, double y, SDL_Surface *img, int px, int py)
+/* Calculate the number of iterations of c=c^2+z required before c becomes
+ * unbounded
+ */
+int iterations(double x, double y, int max_iter)
 {
-    // calculate the color of a pixel with complex value x, y
-    double complex number = 0;
     const double complex offset = x + y * I;
-    int iterations = 0;
-    while (pow(creal(number), 2) + pow(cimag(number), 2) < MY_INFINITY &&
-            iterations < MAX_ITER) {
+    if (pow(creal(offset), 2) + pow(cimag(offset), 2) >= MY_INFINITY)
+        return 0;
+    double complex number = offset;
+    int iterations = 1;
+    while (pow(creal(number), 2) + pow(cimag(number), 2) < MY_INFINITY && iterations < max_iter) {
         iterations++;
         number = cpow(number, 2) + offset;
     }
+    return iterations;
+}
 
+/* Calculate and render a pixel onto the SDL Surface */
+void render_pixel(double x, double y, SDL_Surface *img, int px, int py, int max_iter)
+{
+    int it = iterations(x, y, max_iter);
     // normalize between 0 and 360 for hue.
-    double hue = 360 * (double) iterations / (double) MAX_ITER;
+    double hue = 360 * (double) it / (double) max_iter;
     struct HSV hsv = {hue, 1.0, 1.0};
     struct RGB rgb = HSVToRGB(hsv);
 
     uint8_t red = rgb.R;
     uint8_t green = rgb.G;
     uint8_t blue = rgb.B;
-    if (iterations == MAX_ITER) {
+    if (it == max_iter) {
         red = green = blue = 0;
     }
     uint32_t pixel = red << 16 | green << 8 | blue;
@@ -65,22 +76,43 @@ void render_row(int y, SDL_Surface *img)
     y_coord = ((double)y / (double)img->h) * y_range + min_y;
     for (int x = 0; x < img->w; x++) {
         x_coord = ((double)x / (double)img->w) * (X_MAX - X_MIN) + X_MIN;
-        calculate_color(x_coord, y_coord, img, x, y);
+        render_pixel(x_coord, y_coord, img, x, y, MAX_ITER);
     }
 }
+
+void render_rect(double x_min, double y_min, double w, double h, SDL_Surface *img, SDL_Rect pix_area, int max_iter)
+{
+    double x, y;
+    for (int py = pix_area.y; py < pix_area.y + pix_area.h; py++) {
+        y = y_min + (py - pix_area.y) / (double)pix_area.h * h;
+        for (int px = pix_area.x; px < pix_area.x + pix_area.w; px++) {
+            x = x_min + (px - pix_area.x) / (double)pix_area.w * w;
+            render_pixel(x, y, img, px, py, max_iter);
+        }
+    }
+}
+
+void *worker_render_rect(void *args)
+{
+    struct {double x, y, w, h; SDL_Surface *img; SDL_Rect pix_area; int max_iter;} *arguments
+        = args;
+    render_rect(arguments->x, arguments->y, arguments->w, arguments->h,
+            arguments->img, arguments->pix_area, arguments->max_iter);
+    return NULL;
+}
+
+void *exit_thread(void *return_value)
+{ pthread_exit(return_value); }
 
 long nanos_diff(struct timespec start, struct timespec end)
 {
     long retval;
-    bool adjust = false;
     if (start.tv_nsec > end.tv_nsec) {
-        adjust = true;
+        /* Carry the 1 */
         end.tv_nsec += 1000000000;
         end.tv_sec -= 1;
     }
     retval = 1000000000*(end.tv_sec-start.tv_sec)+end.tv_nsec-start.tv_nsec;
-    if (retval < 0)
-        printf("Retval is negative: %ld (adjust: %d)\n", retval, adjust);
     return retval;
 }
 
@@ -93,7 +125,8 @@ void *worker_spin(void *ptr)
 {
     /* TODO: run arbitrary work function passed via the queue. */
     struct spin_thread_args *spin = ptr;
-    int *row_ptr;
+    void (*work_func)(void *);
+    void *work_args;
     int rows_rendered = 0;
     long wait_ns = 0, render_ns = 0;
     struct rendering_stats *stats;
@@ -101,35 +134,52 @@ void *worker_spin(void *ptr)
     printf("[WORKER %02d] Worker start\n", spin->id);
     while (true) {
         clock_gettime(CLOCK_REALTIME, &start);
-        queue_get(spin->q, (void**)&row_ptr);
+        queue_get(spin->q, &work_func, &work_args);
         clock_gettime(CLOCK_REALTIME, &end);
         wait_ns += nanos_diff(start, end);
-        if (*row_ptr < 0) {
-            stats = malloc(sizeof(struct rendering_stats));
-            stats->nanos_rendering = render_ns;
-            stats->nanos_waiting = wait_ns;
-            printf("[WORKER %02d] Exiting (rendered %04d rows in %.04lf seconds"
-                    ", waited %.04lf seconds)...\n", spin->id, rows_rendered,
-                    render_ns/(double)1000000000,
-                    wait_ns/(double)1000000000);
-            if (queue_empty(spin->q))
-                *spin->keep_window_open = false;
-            pthread_exit(stats);
-        }
         clock_gettime(CLOCK_REALTIME, &start);
-        render_row(*row_ptr, spin->img_surf);
+        work_func(work_args);
         clock_gettime(CLOCK_REALTIME, &end);
         render_ns += nanos_diff(start, end);
         rows_rendered++;
-        free(row_ptr);
     }
     return NULL;
 }
 
-void render_image(struct queue *q, double x, double y, double w, double h)
+void *signal_finished(void *args)
 {
-    // TODO: enqueue all the render tasks
-    // TODO: implement a way of waiting for the tasks - a pthread_cond?
+    pthread_cond_signal(args);
+    return NULL;
+}
+
+void enqueue_render(struct queue *q, double x, double y, double w, double h, SDL_Surface *img, SDL_Rect pix_area, int max_iter, bool total)
+{
+    if (pix_area.w > 64) {
+        SDL_Rect pix_a = {pix_area.x, pix_area.y, pix_area.w/2, pix_area.h};
+        SDL_Rect pix_b = {pix_area.x+pix_area.w/2, pix_area.y, pix_area.w-pix_area.w/2, pix_area.h};
+        enqueue_render(q, x, y, w/2, h, img, pix_a, max_iter, false);
+        enqueue_render(q, x+w/2, y, w/2, h, img, pix_b, max_iter, false);
+        return;
+    }
+    if (pix_area.h > 36) {
+        SDL_Rect pix_a = {pix_area.x, pix_area.y, pix_area.w, pix_area.h/2};
+        SDL_Rect pix_b = {pix_area.x, pix_area.y+pix_area.h/2, pix_area.w, pix_area.h-pix_area.h/2};
+        enqueue_render(q, x, y, w, h/2, img, pix_a, max_iter, false);
+        enqueue_render(q, x, y+h/2, w, h/2, img, pix_b, max_iter, false);
+        return;
+    }
+    struct {double x, y, w, h; SDL_Surface *img; SDL_Rect pix_area; int
+        max_iter;} *args = malloc(sizeof(*args));
+    args->x = x;
+    args->y = y;
+    args->w = w;
+    args->h = h;
+    args->img = img;
+    args->pix_area = pix_area;
+    args->max_iter = max_iter;
+    queue_add(q, &worker_render_rect, args);
+//    if (total)
+//        queue_add(q, &signal_finished, img->userdata);
 }
 
 int main(int argc, char ** argv) {
@@ -142,21 +192,10 @@ int main(int argc, char ** argv) {
 
 
     printf("[MASTER   ] Creating SDL2 window...\n");
-    if (SDL_Init(SDL_INIT_VIDEO) < 0) {
-        fprintf(stderr, "ERROR: Failed to initialise the SDL2 library\n");
-        exit(EXIT_FAILURE);
-    }
-    SDL_Window *window = SDL_CreateWindow("SDL window", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, IMG_WIDTH, IMG_HEIGHT, 0);
-    bool keep_window_open = true;
-    if (window == NULL) {
-        fprintf(stderr, "ERROR: failed to create window\n");
-        exit(EXIT_FAILURE);
-    }
-    SDL_Surface *window_surface = SDL_GetWindowSurface(window);
-    if (window_surface == NULL) {
-        fprintf(stderr, "ERROR: failed to get surface from the window\n");
-        exit(EXIT_FAILURE);
-    }
+    double y_min = (X_MAX - X_MIN) * -0.5 * IMG_HEIGHT/IMG_WIDTH;
+    double y_max = (X_MAX - X_MIN) * 0.5 * IMG_HEIGHT/IMG_WIDTH;
+    struct sdl_window_info window = my_sdl_init(X_MIN, y_min, X_MAX-X_MIN,
+            y_max-y_min, IMG_WIDTH, IMG_HEIGHT, MAX_ITER);
 
     printf("[MASTER   ] Creating worker threads...\n");
     clock_gettime(CLOCK_REALTIME, &start);
@@ -165,58 +204,131 @@ int main(int argc, char ** argv) {
     for (int i = 0; i < nproc; i++) {
         thread_args[i].id = i;
         thread_args[i].q = task_queue;
-        thread_args[i].img_surf = window_surface;
-        thread_args[i].keep_window_open = &keep_window_open;
+        thread_args[i].img_surf = window.surf;
+        thread_args[i].keep_window_open = &window.keep_open;
     }
 
     for (int i = 0; i < nproc; i++) {
         pthread_create(threads+i, NULL, worker_spin, &thread_args[i]);
     }
     clock_gettime(CLOCK_REALTIME, &end);
-    printf("[MASTER   ] Created threads in %.04lf seconds\n", (end.tv_sec+end.tv_nsec/(double)1000000000 - (start.tv_sec+start.tv_nsec/(double)1000000000)));
+    printf("[MASTER   ] Created threads in %.04lf seconds\n", nanos_diff(start, end)/(double)1000000000);
 
     printf("[MASTER   ] Constructing work queue...\n");
     clock_gettime(CLOCK_REALTIME, &start);
-    int *row_task;
-    for (int i = 0; i < IMG_HEIGHT; i++) {
-        row_task = malloc(sizeof(int));
-        *row_task = i;
-        queue_add(task_queue, row_task);
-    }
-    for (int i = 0; i < nproc; i++) {
-        row_task = malloc(sizeof(int));
-        *row_task = -1;
-        queue_add(task_queue, row_task);
-    }
+    enqueue_render(task_queue, window.v.x, window.v.y, window.v.w, window.v.h, window.surf, window.v.view, window.max_iter, true);
     clock_gettime(CLOCK_REALTIME, &end);
-    printf("[MASTER   ] Created work queue in %lf seconds\n", (end.tv_sec+end.tv_nsec/(double)1000000000 - (start.tv_sec+start.tv_nsec/(double)1000000000)));
+    printf("[MASTER   ] Created work queue in %.04lf seconds\n", nanos_diff(start, end)/(double)1000000000);
 
-    while (keep_window_open) {
+    long eventloop_i = 0;
+    while (window.keep_open) {
+        if (eventloop_i == 0) {
+            enqueue_render(task_queue, window.v.x, window.v.y, window.v.w, window.v.h, window.surf, window.v.view, window.max_iter, true);
+        }
         SDL_Event e;
         while (SDL_PollEvent(&e) > 0) {
             switch (e.type) {
                 case SDL_QUIT:
-                    keep_window_open = false;
+                    window.keep_open = false;
+                    break;
+                case SDL_KEYDOWN:
+                    switch (e.key.keysym.sym) {
+                        case SDLK_q:
+                            window.keep_open = false;
+                            break;
+                        case SDLK_r:
+                            window = my_sdl_init(X_MIN, y_min, X_MAX-X_MIN,
+                                    y_max-y_min, IMG_WIDTH, IMG_HEIGHT,
+                                    MAX_ITER);
+                            sdl_blank_screen(window);
+                            SDL_UpdateWindowSurface(window.win);
+                            enqueue_render(task_queue, window.v.x, window.v.y, window.v.w, window.v.h, window.surf, window.v.view, window.max_iter, true);
+                            break;
+                        case SDLK_i:
+                            window.v.x += window.v.w / 4;
+                            window.v.y += window.v.h / 4;
+                            window.v.w /= 2;
+                            window.v.h /= 2;
+                            sdl_blank_screen(window);
+                            SDL_UpdateWindowSurface(window.win);
+                            enqueue_render(task_queue, window.v.x, window.v.y, window.v.w, window.v.h, window.surf, window.v.view, window.max_iter, true);
+                            break;
+                        case SDLK_o:
+                            window.v.w *= 2;
+                            window.v.h *= 2;
+                            window.v.x -= window.v.w / 4;
+                            window.v.y -= window.v.h / 4;
+                            sdl_blank_screen(window);
+                            SDL_UpdateWindowSurface(window.win);
+                            enqueue_render(task_queue, window.v.x, window.v.y, window.v.w, window.v.h, window.surf, window.v.view, window.max_iter, true);
+                            break;
+                        case SDLK_a:
+                            window.v.x -= window.v.w / 4;
+                            sdl_blank_screen(window);
+                            SDL_UpdateWindowSurface(window.win);
+                            enqueue_render(task_queue, window.v.x, window.v.y, window.v.w, window.v.h, window.surf, window.v.view, window.max_iter, true);
+                            break;
+                        case SDLK_d:
+                            window.v.x += window.v.w / 4;
+                            sdl_blank_screen(window);
+                            SDL_UpdateWindowSurface(window.win);
+                            enqueue_render(task_queue, window.v.x, window.v.y, window.v.w, window.v.h, window.surf, window.v.view, window.max_iter, true);
+                            break;
+                        case SDLK_w:
+                            window.v.y -= window.v.h / 4;
+                            sdl_blank_screen(window);
+                            SDL_UpdateWindowSurface(window.win);
+                            enqueue_render(task_queue, window.v.x, window.v.y, window.v.w, window.v.h, window.surf, window.v.view, window.max_iter, true);
+                            break;
+                        case SDLK_s:
+                            window.v.y += window.v.h / 4;
+                            sdl_blank_screen(window);
+                            SDL_UpdateWindowSurface(window.win);
+                            enqueue_render(task_queue, window.v.x, window.v.y, window.v.w, window.v.h, window.surf, window.v.view, window.max_iter, true);
+                            break;
+                        case SDLK_UP:
+                            window.max_iter *= 2;
+                            printf("[MASTER   ] Using %d iterations\n", window.max_iter);
+                            sdl_blank_screen(window);
+                            SDL_UpdateWindowSurface(window.win);
+                            enqueue_render(task_queue, window.v.x, window.v.y, window.v.w, window.v.h, window.surf, window.v.view, window.max_iter, true);
+                            break;
+                        case SDLK_DOWN:
+                            window.max_iter /= 2;
+                            printf("[MASTER   ] Using %d iterations\n", window.max_iter);
+                            sdl_blank_screen(window);
+                            SDL_UpdateWindowSurface(window.win);
+                            enqueue_render(task_queue, window.v.x, window.v.y, window.v.w, window.v.h, window.surf, window.v.view, window.max_iter, true);
+                            break;
+                    }
                     break;
             }
         }
-        SDL_UpdateWindowSurface(window);
+        SDL_UpdateWindowSurface(window.win);
         SDL_Delay(33);
+        eventloop_i++;
     }
 
+    for (int i = 0; i < nproc; i++) {
+        queue_add(task_queue, exit_thread, NULL);
+    }
     printf("[MASTER   ] Waiting for workers to finish...\n");
     clock_gettime(CLOCK_REALTIME, &start);
-    struct rendering_stats *stats_tmp, stats_total;
-    stats_total.nanos_rendering = 0;
-    stats_total.nanos_waiting = 0;
+//    struct rendering_stats *stats_tmp, stats_total;
+//    stats_total.nanos_rendering = 0;
+//    stats_total.nanos_waiting = 0;
     for (int i = 0; i < nproc; i++) {
-        pthread_join(threads[i], (void*)&stats_tmp);
-        stats_total.nanos_rendering += stats_tmp->nanos_rendering;
-        stats_total.nanos_waiting += stats_tmp->nanos_waiting;
+//        pthread_join(threads[i], (void*)&stats_tmp);
+        pthread_join(threads[i], NULL);
+//        stats_total.nanos_rendering += stats_tmp->nanos_rendering;
+//        stats_total.nanos_waiting += stats_tmp->nanos_waiting;
     }
     clock_gettime(CLOCK_REALTIME, &end);
-    printf("[MASTER   ] Workers finished in %.04lf seconds\n", (end.tv_sec+end.tv_nsec/(double)1000000000 - (start.tv_sec+start.tv_nsec/(double)1000000000)));
-    printf("[MASTER   ] Workers spent a total of %.04lf seconds rendering and %.04lf seconds waiting\n", stats_total.nanos_rendering/(double)1000000000, stats_total.nanos_waiting/(double)1000000000);
+    printf("[MASTER   ] Workers finished in %.04lf seconds\n", nanos_diff(start, end)/(double)1000000000);
+//    printf("[MASTER   ] Workers spent a total of %.04lf seconds rendering and %.04lf seconds waiting\n", stats_total.nanos_rendering/(double)1000000000, stats_total.nanos_waiting/(double)1000000000);
+
+//    SDL_UpdateWindowSurface(window);
+//    SDL_Delay(500);
 
 //    save_png_to_file(&image, "out/image.png");
     return 0;

@@ -1,4 +1,4 @@
-#include "threads.h"
+#include "tpool.h"
 
 bool queue_empty(struct queue *q)
 { return (q == NULL) || (q->first == NULL) || (q->last == NULL); }
@@ -30,13 +30,14 @@ void queue_destroy(struct queue *q)
     free(q);
 }
 
-void queue_add(struct queue * q, void *value)
+void queue_add(struct queue * q, void *(*func)(void *), void *args)
 {
     struct queue_item *new;
     new = (struct queue_item*)malloc(sizeof(struct queue_item));
-    new->value = value;
     new->prev = NULL;
     new->next = NULL;
+    new->func = func;
+    new->args = args;
 
     pthread_mutex_lock(&q->mtx);
 
@@ -55,7 +56,7 @@ void queue_add(struct queue * q, void *value)
     pthread_cond_signal(&q->cond);
 }
 
-void queue_get(struct queue *q, void **val_r)
+void queue_get(struct queue *q, void (**func)(void *), void **args)
 {
     pthread_mutex_lock(&q->mtx);
 
@@ -63,7 +64,8 @@ void queue_get(struct queue *q, void **val_r)
         pthread_cond_wait(&q->cond, &q->mtx);
 
     /* Get the item from the first queue entry and free that entry */
-    *val_r = q->first->value;
+    *func = q->first->func;
+    *args = q->first->args;
     struct queue_item *next = q->first->next;
     free(q->first);
     q->first = next;

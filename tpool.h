@@ -13,14 +13,15 @@ struct queue {
 
 struct queue_item {
     struct queue_item *prev;
-    void *value;
+    void *(*func)(void*);
+    void *args;
     struct queue_item *next;
 };
 
 struct queue *queue_init(void);
 void queue_destroy(struct queue *q);
-void queue_add(struct queue *q, void *value);
-void queue_get(struct queue *q, void **val_r);
+void queue_add(struct queue *q, void *(*func)(void *), void *args);
+void queue_get(struct queue *q, void (**func)(void *), void **args);
 bool queue_empty(struct queue *q);
 
 

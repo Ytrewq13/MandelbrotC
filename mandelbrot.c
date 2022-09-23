@@ -10,8 +10,8 @@
 
 #define MAX_ITER 128
 #define MY_INFINITY 16
-#define IMG_WIDTH 1920 * 1
-#define IMG_HEIGHT 1080 * 1
+#define IMG_WIDTH 1280
+#define IMG_HEIGHT 720
 #define X_MIN -2.5
 #define X_MAX 1.5
 
@@ -69,21 +69,57 @@ void render_row(int y, SDL_Surface *img)
     }
 }
 
+long nanos_diff(struct timespec start, struct timespec end)
+{
+    long retval;
+    bool adjust = false;
+    if (start.tv_nsec > end.tv_nsec) {
+        adjust = true;
+        end.tv_nsec += 1000000000;
+        end.tv_sec -= 1;
+    }
+    retval = 1000000000*(end.tv_sec-start.tv_sec)+end.tv_nsec-start.tv_nsec;
+    if (retval < 0)
+        printf("Retval is negative: %ld (adjust: %d)\n", retval, adjust);
+    return retval;
+}
+
+struct rendering_stats {
+    long nanos_rendering;
+    long nanos_waiting;
+};
+
 void *worker_spin(void *ptr)
 {
     /* TODO: run arbitrary work function passed via the queue. */
     struct spin_thread_args *spin = ptr;
     int *row_ptr;
     int rows_rendered = 0;
+    long wait_ns = 0, render_ns = 0;
+    struct rendering_stats *stats;
+    struct timespec start, end;
     printf("[WORKER %02d] Worker start\n", spin->id);
     while (true) {
+        clock_gettime(CLOCK_REALTIME, &start);
         queue_get(spin->q, (void**)&row_ptr);
+        clock_gettime(CLOCK_REALTIME, &end);
+        wait_ns += nanos_diff(start, end);
         if (*row_ptr < 0) {
-            printf("[WORKER %02d] Exiting (rendered %04d rows)...\n", spin->id,
-                    rows_rendered);
-            pthread_exit(NULL);
+            stats = malloc(sizeof(struct rendering_stats));
+            stats->nanos_rendering = render_ns;
+            stats->nanos_waiting = wait_ns;
+            printf("[WORKER %02d] Exiting (rendered %04d rows in %.04lf seconds"
+                    ", waited %.04lf seconds)...\n", spin->id, rows_rendered,
+                    render_ns/(double)1000000000,
+                    wait_ns/(double)1000000000);
+            if (queue_empty(spin->q))
+                *spin->keep_window_open = false;
+            pthread_exit(stats);
         }
+        clock_gettime(CLOCK_REALTIME, &start);
         render_row(*row_ptr, spin->img_surf);
+        clock_gettime(CLOCK_REALTIME, &end);
+        render_ns += nanos_diff(start, end);
         rows_rendered++;
         free(row_ptr);
     }
@@ -111,6 +147,7 @@ int main(int argc, char ** argv) {
         exit(EXIT_FAILURE);
     }
     SDL_Window *window = SDL_CreateWindow("SDL window", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, IMG_WIDTH, IMG_HEIGHT, 0);
+    bool keep_window_open = true;
     if (window == NULL) {
         fprintf(stderr, "ERROR: failed to create window\n");
         exit(EXIT_FAILURE);
@@ -129,6 +166,7 @@ int main(int argc, char ** argv) {
         thread_args[i].id = i;
         thread_args[i].q = task_queue;
         thread_args[i].img_surf = window_surface;
+        thread_args[i].keep_window_open = &keep_window_open;
     }
 
     for (int i = 0; i < nproc; i++) {
@@ -153,7 +191,6 @@ int main(int argc, char ** argv) {
     clock_gettime(CLOCK_REALTIME, &end);
     printf("[MASTER   ] Created work queue in %lf seconds\n", (end.tv_sec+end.tv_nsec/(double)1000000000 - (start.tv_sec+start.tv_nsec/(double)1000000000)));
 
-    bool keep_window_open = true;
     while (keep_window_open) {
         SDL_Event e;
         while (SDL_PollEvent(&e) > 0) {
@@ -169,13 +206,18 @@ int main(int argc, char ** argv) {
 
     printf("[MASTER   ] Waiting for workers to finish...\n");
     clock_gettime(CLOCK_REALTIME, &start);
+    struct rendering_stats *stats_tmp, stats_total;
+    stats_total.nanos_rendering = 0;
+    stats_total.nanos_waiting = 0;
     for (int i = 0; i < nproc; i++) {
-        pthread_join(threads[i], NULL);
+        pthread_join(threads[i], (void*)&stats_tmp);
+        stats_total.nanos_rendering += stats_tmp->nanos_rendering;
+        stats_total.nanos_waiting += stats_tmp->nanos_waiting;
     }
     clock_gettime(CLOCK_REALTIME, &end);
     printf("[MASTER   ] Workers finished in %.04lf seconds\n", (end.tv_sec+end.tv_nsec/(double)1000000000 - (start.tv_sec+start.tv_nsec/(double)1000000000)));
+    printf("[MASTER   ] Workers spent a total of %.04lf seconds rendering and %.04lf seconds waiting\n", stats_total.nanos_rendering/(double)1000000000, stats_total.nanos_waiting/(double)1000000000);
 
 //    save_png_to_file(&image, "out/image.png");
-//    free(image.pixels);
     return 0;
 }

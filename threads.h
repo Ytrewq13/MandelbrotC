@@ -28,6 +28,7 @@ struct spin_thread_args {
     int id;
     struct queue *q;
     SDL_Surface *img_surf;
+    bool *keep_window_open;
 };
 
 void *thread_spin(void*);

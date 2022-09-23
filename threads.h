@@ -1,13 +1,8 @@
 #include <pthread.h>
 #include <stdbool.h>
 #include <stdlib.h>
+#include <SDL2/SDL.h>
 #include "png_maker.h"
-
-struct render_thread_info {
-    int start;
-    int end;
-    bitmap_t *img;
-};
 
 struct queue {
     pthread_cond_t cond;
@@ -32,7 +27,7 @@ bool queue_empty(struct queue *q);
 struct spin_thread_args {
     int id;
     struct queue *q;
-    bitmap_t *img;
+    SDL_Surface *img_surf;
 };
 
 void *thread_spin(void*);

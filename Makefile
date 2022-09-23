@@ -1,5 +1,5 @@
 CC=gcc
-CFLAGS=-I. -lpng -lm -Wall
+CFLAGS=-I. -I/usr/include/SDL2 -L/usr/lib -lSDL2 -lpng -lm -D_REENTRANT -Wall
 DEPS = $(wildcard *.h)
 OBJ := $(patsubst %.c,%.o,$(wildcard *.c))
 
@@ -13,7 +13,7 @@ $(EXE): $(OBJ)
 	$(CC) -o $@ $^ $(CFLAGS)
 
 clean:
-	rm -f $(EXE) $(PICSDIR)/*.png
+	rm -f $(EXE)
 	rm $(OBJ)
 
 run: $(EXE)

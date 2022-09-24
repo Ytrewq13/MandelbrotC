@@ -1,3 +1,6 @@
+#ifndef __TPOOL_H
+#define __TPOOL_H
+
 #include <pthread.h>
 #include <stdbool.h>
 #include <stdlib.h>
@@ -33,3 +36,5 @@ struct spin_thread_args {
 };
 
 void *thread_spin(void*);
+
+#endif

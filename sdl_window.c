@@ -1,7 +1,7 @@
 #include "sdl_window.h"
 
 struct sdl_window_info my_sdl_init(double x, double y, double w, double h,
-        int w_w, int w_h, int max_iter)
+        int w_w, int w_h, int max_iter, void *(*func)(void*))
 {
     struct sdl_window_info ret;
 
@@ -27,7 +27,21 @@ struct sdl_window_info my_sdl_init(double x, double y, double w, double h,
     ret.v.w = w;
     ret.v.h = h;
     ret.max_iter = max_iter;
+    ret.func = func;
+
+    ret._default_keep_open = ret.keep_open;
+    ret._default_v = ret.v;
+    ret._default_max_iter = ret.max_iter;
+    ret._default_func = ret.func;
     return ret;
+}
+
+void my_sdl_reset(struct sdl_window_info *win)
+{
+    win->keep_open = win->_default_keep_open;
+    win->v = win->_default_v;
+    win->max_iter = win->_default_max_iter;
+    win->func = win->_default_func;
 }
 
 void sdl_blank_screen(struct sdl_window_info win)

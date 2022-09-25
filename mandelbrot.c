@@ -24,12 +24,9 @@
 #define HUE_OFFSET 0
 
 /* TODO:
- * * Use SDL2 to display the rendered image
- *      * Interactive controls to move display window (click & drag)
- *      * Re-render the image on-the-fly using the thread-pool (only re-render
- *      new regions)
- * * Arbitrary-precision math (using MPFR)
- * * Re-write rendering function using AVX2 256-bit SIMD compiler intrinsics (immintrin.h)
+ * * When zooming, use SDL_BlitScaled
+ * * Don't re-render areas which already have been determined to terminate (when changing the max iterations)
+ * * Write rendering function using AVX2 256-bit SIMD compiler intrinsics (immintrin.h)
  */
 
 void render_rect(double x, double y, double w, double h, SDL_Surface *img,

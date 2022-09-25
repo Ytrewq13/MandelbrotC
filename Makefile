@@ -1,5 +1,5 @@
 CC=gcc
-CFLAGS=-I. -I/usr/include/SDL2 -L/usr/lib -lSDL2 -lpng -lm -D_REENTRANT -Wall -O3
+CFLAGS=-I. -I/usr/include/SDL2 -L/usr/lib -lSDL2 -lpng -lm -lmpfr -lgmp -D_REENTRANT -Wall -O3
 DEPS = $(wildcard *.h)
 OBJ := $(patsubst %.c,%.o,$(wildcard *.c))
 

@@ -1,9 +1,13 @@
-#include <SDL2/SDL_events.h>
 #include <complex.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
 #include <SDL2/SDL.h>
+#include <stdio.h>
+#include <stdint.h>
+#include <stdarg.h>
+#include <immintrin.h>
+#include <mpfr.h>
 
 #include "png_maker.h"
 #include "tpool.h"
@@ -28,56 +32,8 @@
  * * Re-write rendering function using AVX2 256-bit SIMD compiler intrinsics (immintrin.h)
  */
 
-/* Calculate the number of iterations of c=c^2+z required before c becomes
- * unbounded
- */
-int iterations(double x, double y, int max_iter)
-{
-    const double complex offset = x + y * I;
-    if (pow(creal(offset), 2) + pow(cimag(offset), 2) >= MY_INFINITY)
-        return 0;
-    double complex number = offset;
-    int iterations = 1;
-    while (pow(creal(number), 2) + pow(cimag(number), 2) < MY_INFINITY && iterations < max_iter) {
-        iterations++;
-        number = cpow(number, 2) + offset;
-    }
-    return iterations;
-}
-
-/* Calculate and render a pixel onto the SDL Surface */
-void render_pixel(double x, double y, SDL_Surface *img, int px, int py, int max_iter)
-{
-    int it = iterations(x, y, max_iter);
-    // normalize between 0 and 360 for hue.
-    double hue = 360 * (double) it / (double) max_iter;
-    struct HSV hsv = {hue, 1.0, 1.0};
-    struct RGB rgb = HSVToRGB(hsv);
-
-    uint8_t red = rgb.R;
-    uint8_t green = rgb.G;
-    uint8_t blue = rgb.B;
-    if (it == max_iter) {
-        red = green = blue = 0;
-    }
-    uint32_t pixel = red << 16 | green << 8 | blue;
-    uint32_t *target_pixel = (uint32_t*) ((uint8_t*) img->pixels + py*img->pitch + px*img->format->BytesPerPixel);
-    *target_pixel = pixel;
-}
-
-void render_row(int y, SDL_Surface *img)
-{
-    double min_y = (X_MAX - X_MIN) * -0.5 * img->h/img->w;
-    double y_range = (X_MAX - X_MIN) * 0.5 * img->h/img->w - min_y;
-    double x_coord, y_coord;
-    y_coord = ((double)y / (double)img->h) * y_range + min_y;
-    for (int x = 0; x < img->w; x++) {
-        x_coord = ((double)x / (double)img->w) * (X_MAX - X_MIN) + X_MIN;
-        render_pixel(x_coord, y_coord, img, x, y, MAX_ITER);
-    }
-}
-
-void render_rect(double x, double y, double w, double h, SDL_Surface *img, SDL_Rect view, int max_iter)
+void render_rect(double x, double y, double w, double h, SDL_Surface *img,
+        SDL_Rect view, int max_iter)
 {
     double scale_x = w / (double)view.w;
     double scale_y = h / (double)view.h;
@@ -88,7 +44,8 @@ void render_rect(double x, double y, double w, double h, SDL_Surface *img, SDL_R
         x_cur = x;
         for (int px = view.x; px < view.x + view.w; px++) {
             it = 0;  /* Iterations counter */
-            z_real = z_imag = 0;  /* z (the complex number) */
+            z_real = x_cur;
+            z_imag = y_cur;
             while (pow(z_real, 2) + pow(z_imag, 2) < MY_INFINITY && it < max_iter) {
                 it++;
                 /* z = cpow(z, 2) + c
@@ -124,12 +81,111 @@ void render_rect(double x, double y, double w, double h, SDL_Surface *img, SDL_R
     }
 }
 
-void *worker_render_rect(void *args)
+void render_rect_high_precision(mpfr_t x, mpfr_t y, mpfr_t w, mpfr_t h,
+        SDL_Surface *img, SDL_Rect view, int max_iter, long precision)
 {
-    struct {double x, y, w, h; SDL_Surface *img; SDL_Rect pix_area;
-        int max_iter;} *arguments = args;
-    render_rect(arguments->x, arguments->y, arguments->w, arguments->h,
-            arguments->img, arguments->pix_area, arguments->max_iter);
+    mpfr_t scale_x, scale_y;
+    mpfr_t x_cur, y_cur;
+    mpfr_t z_real, z_imag, mpfr_tmp1, mpfr_tmp2, z_abs_2;
+    int it;
+
+    mpfr_inits2(precision, scale_x, scale_y, x_cur, y_cur, z_real,
+            z_imag, mpfr_tmp1, mpfr_tmp2, z_abs_2, NULL);
+
+//    double scale_x = w / (double)view.w;
+//    double scale_y = h / (double)view.h;
+    mpfr_div_d(scale_x, w, view.w, MPFR_RNDU);
+    mpfr_div_d(scale_y, h, view.h, MPFR_RNDU);
+
+//    y_cur = y;
+    mpfr_set(y_cur, y, MPFR_RNDU);
+    for (int py = view.y; py < view.y + view.h; py++) {
+//        x_cur = x;
+        mpfr_set(x_cur, x, MPFR_RNDU);
+        for (int px = view.x; px < view.x + view.w; px++) {
+            it = 0;  /* Iterations counter */
+//            z_real = x_cur;
+            mpfr_set(z_real, x_cur, MPFR_RNDU);
+//            z_imag = y_cur;
+            mpfr_set(z_imag, y_cur, MPFR_RNDU);
+            // Calculate the square of the absolute value of z
+            mpfr_sqr(mpfr_tmp1, z_real, MPFR_RNDU); /* pow(z_real, 2) */
+            mpfr_sqr(mpfr_tmp2, z_imag, MPFR_RNDU); /* pow(z_imag, 2) */
+            mpfr_add(z_abs_2, mpfr_tmp1, mpfr_tmp2, MPFR_RNDU); /* pow(z_real, 2) + pow(z_imag, 2) */
+            while (mpfr_cmp_ui(z_abs_2, MY_INFINITY) <= 0 && it < max_iter) {
+                it++;
+                /* z = cpow(z, 2) + c
+                 * z = (a + bI)(a + bI) + (d + eI)
+                 * z = a^2 + 2*a*bI - b^2 + d + eI
+                 * z_real = a^2 - b^2 + d
+                 * z_imag = 2*a*b + e
+                 * z_real = z_real^2 - z_imag^2 + x
+                 * z_imag = 2*z_real*z_imag + y
+                 */
+//                double a = pow(z_real, 2) - pow(z_imag, 2) + x_cur;
+                mpfr_sqr(mpfr_tmp1, z_real, MPFR_RNDU); /* pow(z_real, 2) */
+                mpfr_sqr(mpfr_tmp2, z_imag, MPFR_RNDU); /* pow(z_imag, 2) */
+                mpfr_sub(mpfr_tmp1, mpfr_tmp1, mpfr_tmp2, MPFR_RNDU); /* pow(z_real, 2) - pow(z_imag, 2) */
+                mpfr_add(mpfr_tmp1, mpfr_tmp1, x_cur, MPFR_RNDU); /* pow(z_real, 2) - pow(z_imag, 2) + x_cur */
+//                double b = 2 * z_real * z_imag + y_cur;
+                mpfr_mul_ui(mpfr_tmp2, z_real, 2, MPFR_RNDU); /* 2 * z_real */
+                mpfr_mul(mpfr_tmp2, mpfr_tmp2, z_imag, MPFR_RNDU); /* 2 * z_real * z_imag */
+                mpfr_add(mpfr_tmp2, mpfr_tmp2, y_cur, MPFR_RNDU); /* 2 * z_real * z_imag + y_cur */
+//                z_real = a;
+//                z_imag = b;
+                mpfr_set(z_real, mpfr_tmp1, MPFR_RNDU);
+                mpfr_set(z_imag, mpfr_tmp2, MPFR_RNDU);
+
+                // Calculate the square of the absolute value of z
+                mpfr_sqr(mpfr_tmp1, z_real, MPFR_RNDU); /* pow(z_real, 2) */
+                mpfr_sqr(mpfr_tmp2, z_imag, MPFR_RNDU); /* pow(z_imag, 2) */
+                mpfr_add(z_abs_2, mpfr_tmp1, mpfr_tmp2, MPFR_RNDU); /* pow(z_real, 2) + pow(z_imag, 2) */
+            }
+            // normalize between 0 and 360 for hue.
+            double hue = 360 * (double) it / (double) max_iter;
+            struct HSV hsv = {hue, 1.0, 1.0};
+            struct RGB rgb = HSVToRGB(hsv);
+
+            uint8_t red = rgb.R;
+            uint8_t green = rgb.G;
+            uint8_t blue = rgb.B;
+            if (it == max_iter) {
+                red = green = blue = 0;
+            }
+            uint32_t pixel = red << 16 | green << 8 | blue;
+            uint32_t *target_pixel = (uint32_t*) ((uint8_t*) img->pixels + py*img->pitch + px*img->format->BytesPerPixel);
+            *target_pixel = pixel;
+//            x_cur += scale_x;
+            mpfr_add(x_cur, x_cur, scale_x, MPFR_RNDU);
+        }
+//        y_cur += scale_y;
+        mpfr_add(y_cur, y_cur, scale_y, MPFR_RNDU);
+    }
+    mpfr_clears(x, y, w, h, scale_x, scale_y, x_cur, y_cur, z_real, z_imag,
+            mpfr_tmp1, mpfr_tmp2, z_abs_2, NULL);
+}
+
+struct render_rect_args {
+    double x, y, w, h;
+    mpfr_t x_hp, y_hp, w_hp, h_hp;
+    SDL_Surface *img;
+    SDL_Rect view;
+    int max_iter;
+    bool use_high_precision;
+    long precision;
+};
+
+void *worker_render_rect(void *arguments)
+{
+    struct render_rect_args *args = arguments;
+    if (args->use_high_precision) {
+        render_rect_high_precision(args->x_hp, args->y_hp, args->w_hp,
+                args->h_hp, args->img, args->view, args->max_iter,
+                args->precision);
+    } else {
+        render_rect(args->x, args->y, args->w, args->h, args->img, args->view,
+                args->max_iter);
+    }
     return NULL;
 }
 
@@ -173,48 +229,125 @@ void *signal_finished(void *args)
     return NULL;
 }
 
-void enqueue_render(struct queue *q, double x, double y, double w, double h, SDL_Surface *img, SDL_Rect pix_area, int max_iter, void *(*render_func)(void*), bool total)
+void enqueue_render(struct queue *q, struct viewport_mapping view, SDL_Surface *img, int max_iter, void *(*render_func)(void*), bool total)
 {
-    if (pix_area.w > 64) {
-        SDL_Rect pix_a = {pix_area.x, pix_area.y, pix_area.w/2, pix_area.h};
-        SDL_Rect pix_b = {pix_area.x+pix_area.w/2, pix_area.y, pix_area.w-pix_area.w/2, pix_area.h};
-        enqueue_render(q, x, y, w/2, h, img, pix_a, max_iter, render_func, false);
-        enqueue_render(q, x+w/2, y, w/2, h, img, pix_b, max_iter, render_func, false);
+//    if (view.use_high_precision)
+//        printf("USING HIGH PRECISION!\n");
+    if (view.view.w > 64) {
+        SDL_Rect pix_a = {view.view.x, view.view.y, view.view.w/2, view.view.h};
+        SDL_Rect pix_b = {view.view.x+view.view.w/2, view.view.y, view.view.w-view.view.w/2, view.view.h};
+        struct viewport_mapping v1, v2;
+        v1.use_high_precision = v2.use_high_precision = view.use_high_precision;
+        v1.precision = v2.precision = view.precision;
+        if (view.use_high_precision) {
+//            mpfr_inits2(view.precision, v1.x_hp, v1.y_hp, v1.w_hp,
+//                    v1.h_hp, v2.x_hp, v2.y_hp, v2.w_hp, v2.h_hp, NULL);
+            mpfr_init2(v1.x_hp, v1.precision);
+            mpfr_init2(v1.y_hp, v1.precision);
+            mpfr_init2(v1.w_hp, v1.precision);
+            mpfr_init2(v1.h_hp, v1.precision);
+            mpfr_init2(v2.x_hp, v2.precision);
+            mpfr_init2(v2.y_hp, v2.precision);
+            mpfr_init2(v2.w_hp, v2.precision);
+            mpfr_init2(v2.h_hp, v2.precision);
+            mpfr_set(v1.x_hp, view.x_hp, MPFR_RNDN);
+            mpfr_set(v1.y_hp, view.y_hp, MPFR_RNDN);
+            mpfr_set(v1.h_hp, view.h_hp, MPFR_RNDN);
+            mpfr_set(v2.y_hp, view.y_hp, MPFR_RNDN);
+            mpfr_set(v2.h_hp, view.h_hp, MPFR_RNDN);
+            mpfr_div_si(v1.w_hp, view.w_hp, 2, MPFR_RNDN);
+            mpfr_set(v2.w_hp, v1.w_hp, MPFR_RNDN);
+            mpfr_add(v2.x_hp, view.x_hp, v2.w_hp, MPFR_RNDN);
+        } else {
+            v1 = v2 = view;
+            v1.w = view.w/2;
+            v2.w = view.w/2;
+            v2.x = view.x + v2.w;
+        }
+        v1.view = pix_a;
+        v2.view = pix_b;
+        enqueue_render(q, v1, img, max_iter, render_func, false);
+        enqueue_render(q, v2, img, max_iter, render_func, false);
         return;
     }
-    if (pix_area.h > 36) {
-        SDL_Rect pix_a = {pix_area.x, pix_area.y, pix_area.w, pix_area.h/2};
-        SDL_Rect pix_b = {pix_area.x, pix_area.y+pix_area.h/2, pix_area.w, pix_area.h-pix_area.h/2};
-        enqueue_render(q, x, y, w, h/2, img, pix_a, max_iter, render_func, false);
-        enqueue_render(q, x, y+h/2, w, h/2, img, pix_b, max_iter, render_func, false);
+    if (view.view.h > 36) {
+        SDL_Rect pix_a = {view.view.x, view.view.y, view.view.w, view.view.h/2};
+        SDL_Rect pix_b = {view.view.x, view.view.y+view.view.h/2, view.view.w, view.view.h-view.view.h/2};
+        struct viewport_mapping v1, v2;
+        v1.use_high_precision = v2.use_high_precision = view.use_high_precision;
+        v1.precision = v2.precision = view.precision;
+        if (view.use_high_precision) {
+//            mpfr_inits2(view.precision, v1.x_hp, v1.y_hp, v1.w_hp,
+//                    v1.h_hp, v2.x_hp, v2.y_hp, v2.w_hp, v2.h_hp, NULL);
+            mpfr_init2(v1.x_hp, v1.precision);
+            mpfr_init2(v1.y_hp, v1.precision);
+            mpfr_init2(v1.w_hp, v1.precision);
+            mpfr_init2(v1.h_hp, v1.precision);
+            mpfr_init2(v2.x_hp, v2.precision);
+            mpfr_init2(v2.y_hp, v2.precision);
+            mpfr_init2(v2.w_hp, v2.precision);
+            mpfr_init2(v2.h_hp, v2.precision);
+            mpfr_set(v1.x_hp, view.x_hp, MPFR_RNDN);
+            mpfr_set(v1.y_hp, view.y_hp, MPFR_RNDN);
+            mpfr_set(v1.w_hp, view.w_hp, MPFR_RNDN);
+            mpfr_set(v2.x_hp, view.x_hp, MPFR_RNDN);
+            mpfr_set(v2.w_hp, view.w_hp, MPFR_RNDN);
+            mpfr_div_si(v1.h_hp, view.h_hp, 2, MPFR_RNDN);
+            mpfr_set(v2.h_hp, v1.h_hp, MPFR_RNDN);
+            mpfr_add(v2.y_hp, view.y_hp, v2.h_hp, MPFR_RNDN);
+        } else {
+            v1 = v2 = view;
+            v1.h = view.h/2;
+            v2.h = view.h/2;
+            v2.y = view.y + v2.h;
+        }
+        v1.view = pix_a;
+        v2.view = pix_b;
+        enqueue_render(q, v1, img, max_iter, render_func, false);
+        enqueue_render(q, v2, img, max_iter, render_func, false);
         return;
     }
-    struct {double x, y, w, h; SDL_Surface *img; SDL_Rect pix_area; int
-        max_iter;} *args = malloc(sizeof(*args));
-    args->x = x;
-    args->y = y;
-    args->w = w;
-    args->h = h;
+    struct render_rect_args *args = malloc(sizeof(struct render_rect_args));
+    if (view.use_high_precision) {
+        mpfr_init2(args->x_hp, view.precision);
+        mpfr_init2(args->y_hp, view.precision);
+        mpfr_init2(args->w_hp, view.precision);
+        mpfr_init2(args->h_hp, view.precision);
+        mpfr_set(args->x_hp, view.x_hp, MPFR_RNDN);
+        mpfr_set(args->y_hp, view.y_hp, MPFR_RNDN);
+        mpfr_set(args->w_hp, view.w_hp, MPFR_RNDN);
+        mpfr_set(args->h_hp, view.h_hp, MPFR_RNDN);
+    } else {
+        args->x = view.x;
+        args->y = view.y;
+        args->w = view.w;
+        args->h = view.h;
+    }
     args->img = img;
-    args->pix_area = pix_area;
+    args->view = view.view;
+    args->use_high_precision = view.use_high_precision;
+    args->precision = view.precision;
     args->max_iter = max_iter;
     queue_add(q, render_func, args);
 //    if (total)
 //        queue_add(q, &signal_finished, img->userdata);
 }
 
-void draw(struct sdl_window_info win)
+void draw(struct sdl_window_info win, struct viewport_mapping *view)
 {
-    enqueue_render(win.q, win.v.x, win.v.y, win.v.w, win.v.h, win.surf,
-            win.v.view, win.max_iter, win.func, true);
+    struct viewport_mapping v = win.v;
+    if (view != NULL) v = *view;
+    enqueue_render(win.q, v, win.surf, win.max_iter, win.func, true);
 }
 
-void redraw(struct sdl_window_info win)
+void redraw(struct sdl_window_info win, struct viewport_mapping *view)
 {
-    sdl_blank_screen(win);
-    SDL_UpdateWindowSurface(win.win);
-    enqueue_render(win.q, win.v.x, win.v.y, win.v.w, win.v.h, win.surf,
-            win.v.view, win.max_iter, win.func, true);
+    if (view == NULL)
+        sdl_blank_screen(win, win.v.view);
+    else
+        sdl_blank_screen(win, view->view);
+//    SDL_UpdateWindowSurface(win.win)
+    draw(win, view);
 }
 
 int main(int argc, char ** argv) {
@@ -252,12 +385,12 @@ int main(int argc, char ** argv) {
 
     printf("[MASTER   ] Constructing work queue...\n");
     clock_gettime(CLOCK_REALTIME, &start);
-//    enqueue_render(task_queue, window.v.x, window.v.y, window.v.w, window.v.h, window.surf, window.v.view, window.max_iter, window.func, true);
-    draw(window);
+    draw(window, NULL);
     clock_gettime(CLOCK_REALTIME, &end);
     printf("[MASTER   ] Created work queue in %.04lf seconds\n", nanos_diff(start, end)/(double)1000000000);
 
     long eventloop_i = 0;
+    struct viewport_mapping redraw_area;
     while (window.keep_open) {
         SDL_Event e;
         while (SDL_PollEvent(&e) > 0) {
@@ -272,51 +405,57 @@ int main(int argc, char ** argv) {
                             break;
                         case SDLK_r:
                             my_sdl_reset(&window);
-                            redraw(window);
+                            redraw(window, NULL);
                             break;
                         case SDLK_i:
-                            window.v.x += window.v.w / 4;
-                            window.v.y += window.v.h / 4;
-                            window.v.w /= 2;
-                            window.v.h /= 2;
-                            redraw(window);
+                        case SDLK_t:
+                            viewport_zoom(&window, ZOOM_IN);
+                            // TODO: Automatically switch to high-precision when width < 0.0000000000005
+                            redraw(window, NULL);
                             break;
                         case SDLK_o:
-                            window.v.w *= 2;
-                            window.v.h *= 2;
-                            window.v.x -= window.v.w / 4;
-                            window.v.y -= window.v.h / 4;
-                            redraw(window);
+                        case SDLK_g:
+                            viewport_zoom(&window, ZOOM_OUT);
+                            redraw(window, NULL);
                             break;
-                        case SDLK_a:
-                            window.v.x -= window.v.w / 4;
-                            redraw(window);
+                        case SDLK_h:
+                            viewport_mv(&window, MV_LEFT, &redraw_area);
+                            redraw(window, &redraw_area);
                             break;
-                        case SDLK_d:
-                            window.v.x += window.v.w / 4;
-                            redraw(window);
+                        case SDLK_l:
+                            viewport_mv(&window, MV_RIGHT, &redraw_area);
+                            redraw(window, &redraw_area);
                             break;
-                        case SDLK_w:
-                            window.v.y -= window.v.h / 4;
-                            redraw(window);
+                        case SDLK_k:
+                            viewport_mv(&window, MV_UP, &redraw_area);
+                            redraw(window, &redraw_area);
                             break;
-                        case SDLK_s:
-                            window.v.y += window.v.h / 4;
-                            redraw(window);
+                        case SDLK_j:
+                            viewport_mv(&window, MV_DOWN, &redraw_area);
+                            redraw(window, &redraw_area);
                             break;
                         case SDLK_UP:
-                            window.max_iter *= 2;
+                            if (window.max_iter <= 128)
+                                window.max_iter *= 2;
+                            else
+                                window.max_iter += 128;
+                            // TODO: Write iterations in a corner of the window
                             printf("[MASTER   ] Using %d iterations\n", window.max_iter);
-                            redraw(window);
+                            redraw(window, NULL);
                             break;
                         case SDLK_DOWN:
-                            window.max_iter /= 2;
+                            if (window.max_iter == 1)
+                                break;
+                            if (window.max_iter <= 128)
+                                window.max_iter /= 2;
+                            else
+                                window.max_iter -= 128;
                             printf("[MASTER   ] Using %d iterations\n", window.max_iter);
-                            redraw(window);
+                            redraw(window, NULL);
                             break;
-                        case SDLK_1:
-                            window.func = &worker_render_rect;
-                            redraw(window);
+                        case SDLK_p:
+                            toggle_high_precision(&window);
+                            redraw(window, NULL);
                             break;
                     }
                     break;
@@ -326,6 +465,7 @@ int main(int argc, char ** argv) {
         SDL_Delay(33);
         eventloop_i++;
     }
+    mpfr_free_cache();
 
     for (int i = 0; i < nproc; i++) {
         queue_add(task_queue, exit_thread, NULL);
@@ -344,9 +484,6 @@ int main(int argc, char ** argv) {
     clock_gettime(CLOCK_REALTIME, &end);
     printf("[MASTER   ] Workers finished in %.04lf seconds\n", nanos_diff(start, end)/(double)1000000000);
 //    printf("[MASTER   ] Workers spent a total of %.04lf seconds rendering and %.04lf seconds waiting\n", stats_total.nanos_rendering/(double)1000000000, stats_total.nanos_waiting/(double)1000000000);
-
-//    SDL_UpdateWindowSurface(window);
-//    SDL_Delay(500);
 
 //    save_png_to_file(&image, "out/image.png");
     return 0;

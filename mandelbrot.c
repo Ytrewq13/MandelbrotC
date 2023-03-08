@@ -6,7 +6,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <stdarg.h>
-#include <immintrin.h>
+#include <immintrin.h> // TODO
 #include <mpfr.h>
 
 #include "png_maker.h"
@@ -24,6 +24,10 @@
 #define HUE_OFFSET 0
 
 /* TODO:
+ * * Fixed-point numbers - could they be faster than MPFR fixed-width floating
+ * point?
+ * * Would OpenCL be faster for computing the mandelbrot iterations?
+ *      * OpenCL C mixed-precision (MPFR)?
  * * When zooming, use SDL_BlitScaled
  * * Don't re-render areas which already have been determined to terminate (when changing the max iterations)
  * * Write rendering function using AVX2 256-bit SIMD compiler intrinsics (immintrin.h)
@@ -86,24 +90,25 @@ void render_rect_high_precision(mpfr_t x, mpfr_t y, mpfr_t w, mpfr_t h,
     mpfr_t z_real, z_imag, mpfr_tmp1, mpfr_tmp2, z_abs_2;
     int it;
 
+    // TODO: determine if there are any black pixels in the region described by `view`
     mpfr_inits2(precision, scale_x, scale_y, x_cur, y_cur, z_real,
             z_imag, mpfr_tmp1, mpfr_tmp2, z_abs_2, NULL);
 
-//    double scale_x = w / (double)view.w;
-//    double scale_y = h / (double)view.h;
+    /* double scale_x = w / (double)view.w; */
+    /* double scale_y = h / (double)view.h; */
     mpfr_div_d(scale_x, w, view.w, MPFR_RNDU);
     mpfr_div_d(scale_y, h, view.h, MPFR_RNDU);
 
-//    y_cur = y;
+    /* y_cur = y; */
     mpfr_set(y_cur, y, MPFR_RNDU);
     for (int py = view.y; py < view.y + view.h; py++) {
-//        x_cur = x;
+        /* x_cur = x; */
         mpfr_set(x_cur, x, MPFR_RNDU);
         for (int px = view.x; px < view.x + view.w; px++) {
             it = 0;  /* Iterations counter */
-//            z_real = x_cur;
+            /* z_real = x_cur; */
             mpfr_set(z_real, x_cur, MPFR_RNDU);
-//            z_imag = y_cur;
+            /* z_imag = y_cur; */
             mpfr_set(z_imag, y_cur, MPFR_RNDU);
             // Calculate the square of the absolute value of z
             mpfr_sqr(mpfr_tmp1, z_real, MPFR_RNDU); /* pow(z_real, 2) */
@@ -119,17 +124,17 @@ void render_rect_high_precision(mpfr_t x, mpfr_t y, mpfr_t w, mpfr_t h,
                  * z_real = z_real^2 - z_imag^2 + x
                  * z_imag = 2*z_real*z_imag + y
                  */
-//                double a = pow(z_real, 2) - pow(z_imag, 2) + x_cur;
+                /* double a = pow(z_real, 2) - pow(z_imag, 2) + x_cur; */
                 mpfr_sqr(mpfr_tmp1, z_real, MPFR_RNDU); /* pow(z_real, 2) */
                 mpfr_sqr(mpfr_tmp2, z_imag, MPFR_RNDU); /* pow(z_imag, 2) */
                 mpfr_sub(mpfr_tmp1, mpfr_tmp1, mpfr_tmp2, MPFR_RNDU); /* pow(z_real, 2) - pow(z_imag, 2) */
                 mpfr_add(mpfr_tmp1, mpfr_tmp1, x_cur, MPFR_RNDU); /* pow(z_real, 2) - pow(z_imag, 2) + x_cur */
-//                double b = 2 * z_real * z_imag + y_cur;
+                /* double b = 2 * z_real * z_imag + y_cur; */
                 mpfr_mul_ui(mpfr_tmp2, z_real, 2, MPFR_RNDU); /* 2 * z_real */
                 mpfr_mul(mpfr_tmp2, mpfr_tmp2, z_imag, MPFR_RNDU); /* 2 * z_real * z_imag */
                 mpfr_add(mpfr_tmp2, mpfr_tmp2, y_cur, MPFR_RNDU); /* 2 * z_real * z_imag + y_cur */
-//                z_real = a;
-//                z_imag = b;
+                /* z_real = a; */
+                /* z_imag = b; */
                 mpfr_set(z_real, mpfr_tmp1, MPFR_RNDU);
                 mpfr_set(z_imag, mpfr_tmp2, MPFR_RNDU);
 
@@ -152,10 +157,10 @@ void render_rect_high_precision(mpfr_t x, mpfr_t y, mpfr_t w, mpfr_t h,
             uint32_t pixel = red << 16 | green << 8 | blue;
             uint32_t *target_pixel = (uint32_t*) ((uint8_t*) img->pixels + py*img->pitch + px*img->format->BytesPerPixel);
             *target_pixel = pixel;
-//            x_cur += scale_x;
+            /* x_cur += scale_x; */
             mpfr_add(x_cur, x_cur, scale_x, MPFR_RNDU);
         }
-//        y_cur += scale_y;
+        /* y_cur += scale_y; */
         mpfr_add(y_cur, y_cur, scale_y, MPFR_RNDU);
     }
     mpfr_clears(x, y, w, h, scale_x, scale_y, x_cur, y_cur, z_real, z_imag,
